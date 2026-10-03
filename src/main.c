@@ -1417,10 +1417,8 @@ static int mode_interactive(struct app *a)
 	struct tui t;
 	int ch;
 
-	if (channels_load(a->opt.channels, &list) || list.n == 0) {
-		LOG("no channel list '%s': run --scan first\n", a->opt.channels);
-		return 1;
-	}
+	/* an empty list is fine: the TUI opens straight into the scan menu */
+	channels_load(a->opt.channels, &list);
 	channel_list_sort(&list);
 
 	if (tsout_add_http(a->out, a->opt.http_port) || tsout_start(a->out)) {
@@ -1433,7 +1431,7 @@ static int mode_interactive(struct app *a)
 	t.list = &list;
 	t.cur_idx = -1;
 	t.last_t = now_ms();
-	t.filt = malloc(list.n * sizeof(int));
+	t.filt = malloc((list.n + 1) * sizeof(int));
 	t.filt_cap = list.n;
 	if (!t.filt) {
 		channel_list_free(&list);
@@ -1459,6 +1457,8 @@ static int mode_interactive(struct app *a)
 	}
 
 	tui_filter(&t);
+	if (list.n == 0)	/* no channels yet: go straight to the scan menu */
+		tui_scan_menu(&t);
 	while (!g_stop) {
 		tui_draw(&t);
 		ch = getch();
@@ -1936,11 +1936,6 @@ int main(int argc, char **argv)
 	app.out = tsout_create(32 * 1024 * 1024, &app.psi);
 	if (!app.out)
 		return 1;
-
-	if (opt->mode == MODE_INTERACTIVE && access(opt->channels, R_OK) != 0) {
-		LOG("no channel list '%s': run --scan first\n", opt->channels);
-		goto out;
-	}
 
 	/* the TUI owns the screen: send stray logs to a file instead of stderr */
 	if (opt->mode == MODE_INTERACTIVE) {
