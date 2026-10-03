@@ -660,9 +660,13 @@ static int mode_blindscan(struct app *a)
 	if (travel > 0) {
 		uint64_t until = now_ms() + travel;
 
-		scan_report("moving the dish...");
-		while (!scan_stopped() && now_ms() < until)
-			msleep(100);
+		/* report once a second: this redraws and polls input, so the
+		 * screen shows a countdown and Esc/q can abort the move */
+		while (!scan_stopped() && now_ms() < until) {
+			scan_report("moving the dish... %d s",
+				    (int)((until - now_ms()) / 1000) + 1);
+			msleep(800);
+		}
 	}
 
 	for (p = 0; p < npol && !scan_stopped(); p++) {
