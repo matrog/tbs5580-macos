@@ -1,0 +1,9 @@
+# build
+tbs5580
+src/*.o
+
+# runtime data (generated at use time)
+channels.conf
+tbs5580.log
+tbs5580_rotor.state
+*.ts
