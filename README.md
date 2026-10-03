@@ -95,6 +95,75 @@ next to the binary, in `<binary>/../share/tbs5580`, or in `--fw-dir`).
 - Prefer a **direct USB connection** (a plain USB‑C → USB‑A adapter is fine)
   rather than going through a dock/hub.
 
+## First-time setup
+
+The first time you run the interactive UI there is no channel list yet:
+
+```sh
+./tbs5580 -i
+```
+
+Because `channels.conf` does not exist, the TUI opens **straight into the scan
+menu**. Set up your satellite like this:
+
+1. Choose **"Change target satellite…"** and answer two prompts:
+   - **Satellite** — the orbital position, e.g. `13E`, `19.2E`, `30W`.
+   - **Rotor** — how the dish reaches it:
+     - a **DiSEqC 1.2** stored position number, e.g. `2`;
+     - **USALS**, as `usals:LAT,LON` with your site coordinates,
+       e.g. `usals:45.46N,9.19E`;
+     - `-` if the dish is fixed (no motor).
+2. Pick a scan method:
+   - **Single transponder** — enter one TP (frequency, polarization, SR);
+   - **Whole satellite from known TPs (NIT)** — start from one TP and follow
+     the network table;
+   - **Blind scan** — let the tuner find every transponder by itself.
+
+The dish moves (if needed), the scan runs, and the channels are written to
+`channels.conf`. Each channel remembers its satellite and how to point the dish,
+so from then on choosing a channel on another satellite moves the dish for you.
+
+### Examples (13°E, Hotbird)
+
+Point at 13°E with **USALS** and blind-scan it:
+
+```
+Change target satellite…
+  Satellite: 13E
+  Rotor:     usals:45.46N,9.19E     # your own latitude,longitude
+→ Blind scan
+```
+
+Point at 13°E with a **DiSEqC 1.2** stored position (say position 1 in your
+motor) and scan from a known transponder:
+
+```
+Change target satellite…
+  Satellite: 13E
+  Rotor:     1
+→ Whole satellite from known TPs (NIT)
+  Frequency: 11013
+  Polarization: H
+  Symbol rate: 29900
+```
+
+You can do the same from the command line:
+
+```sh
+# USALS
+./tbs5580 --usals 45.46N,9.19E --sat 13E --blindscan
+# DiSEqC 1.2 position 1
+./tbs5580 --positions 13E=1 --sat 13E --scan -f 11013 -p H -s 29900
+```
+
+To (re)attach a rotor position to an already-scanned satellite without
+rescanning:
+
+```sh
+./tbs5580 --set-position 13E=1
+./tbs5580 --set-position 13E=usals:45.46N,9.19E
+```
+
 ## Usage
 
 ```sh
