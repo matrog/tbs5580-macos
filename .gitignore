@@ -7,3 +7,6 @@ channels.conf
 tbs5580.log
 tbs5580_rotor.state
 *.ts
+
+# proprietary firmware (not redistributed - see firmware/README.md)
+firmware/*.fw

@@ -1,5 +1,9 @@
 # tbs5580-macos
 
+![build](https://img.shields.io/github/actions/workflow/status/matrog/tbs5580-macos/build.yml)
+![license](https://img.shields.io/badge/license-GPL--2.0-blue)
+![platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+
 A user-space DVB-S/S2 driver for the **TurboSight TBS 5580** USB tuner on
 **macOS**. It talks to the card entirely through libusb — no kernel extension,
 no DriverKit, no signing — and gives you channel scanning, a full-screen
@@ -8,6 +12,28 @@ terminal UI, and transport-stream output to VLC, a file, UDP or HTTP.
 It is a user-space port of the Linux TBS `media_build` drivers (the Cypress FX2
 bridge, the Silicon Labs Si2183 demodulator and the Airoha AV2018 tuner), plus
 the Si2183 hardware blind-scan code from neumoDVB.
+
+## Screenshot
+
+The interactive chooser (`-i`):
+
+```text
+ tbs5580  -  142/1504 channels  [free]  sort:name
+Search: hd
+ Rai 1 HD                          HD    13.0E  11766.540 V  Rai
+ Rai 2 HD                          HD    13.0E  11766.540 V  Rai
+ Rai 3 HD                          HD    13.0E  11766.540 V  Rai
+ Rai News 24 HD                    HD    13.0E  11013.599 H  Rai
+ Rai Sport HD                      HD    13.0E  11013.599 H  Rai
+ $Sky Cinema HD                    HD    13.0E  11843.280 V  Sky
+ Sky Sport HD                      HD    13.0E  11843.280 V  Sky
+ ...
+ LOCK  DVB-S2 8PSK 3/4  C/N 13.8 dB  RF -43.7 dBm  7.01 Mbit/s
+ up/down  Enter play  type search  ^F sat  ^O sort  ^N scan  ^A all  Esc quit
+```
+
+Scrambled channels are shown with a `$`. The bottom line is the live signal of
+the channel being played.
 
 > Satellite only. DVB-T/T2/C (the card's terrestrial/cable tuner) and the CI/CAM
 > slot are **not** implemented. See [Limitations](#limitations).
@@ -50,14 +76,16 @@ This produces the `tbs5580` binary. `make install` copies it to
 
 ### Firmware
 
-The card needs two firmware files, included in `firmware/`:
+The card needs two firmware files which are **not** bundled here because they
+are proprietary (TBS / Silicon Labs):
 
 - `dvb-usb-id5580.fw` — the Cypress FX2 USB controller firmware.
 - `dvb-demod-si2183-b60-01.fw` — the Si2183 demodulator firmware.
 
-They are loaded automatically. The program looks for them in `./firmware`, next
-to the binary, in `<binary>/../share/tbs5580`, or in a directory you pass with
-`--fw-dir`.
+Get them from the official TBS Linux driver package and drop them into
+`firmware/` — see [`firmware/README.md`](firmware/README.md) for the exact
+steps. They are then loaded automatically (the program looks in `./firmware`,
+next to the binary, in `<binary>/../share/tbs5580`, or in `--fw-dir`).
 
 ### Hardware notes
 
