@@ -43,6 +43,8 @@ static void scan_report(const char *fmt, ...)
 	va_end(ap);
 	if (g_scan_progress)
 		g_scan_progress(buf);
+	else if (buf[0] == '\r')
+		fprintf(stderr, "%s   \r", buf), fflush(stderr);	/* in-place */
 	else
 		LOG("%s\n", buf);
 }
@@ -663,9 +665,9 @@ static int mode_blindscan(struct app *a)
 		/* report once a second: this redraws and polls input, so the
 		 * screen shows a countdown and Esc/q can abort the move */
 		while (!scan_stopped() && now_ms() < until) {
-			scan_report("moving the dish... %d s",
-				    (int)((until - now_ms()) / 1000) + 1);
-			msleep(800);
+			scan_report("\rmoving the dish... %d s",
+				    (int)((until - now_ms() + 999) / 1000));
+			msleep(500);
 		}
 	}
 
@@ -1003,10 +1005,15 @@ static void tui_scan_draw(const char *title, bool done)
 static void tui_scan_progress(const char *line)
 {
 	int ch = getch();	/* nodelay is on during the scan */
+	bool inplace = line[0] == '\r';	/* replace the last line instead of adding one */
 
+	if (inplace)
+		line++;
 	if (ch == 27 || ch == 'q')
 		g_scan_stop = 1;
-	if (scanlog_n < SCANLOG_MAX) {
+	if (inplace && scanlog_n > 0) {
+		strlcpy(scanlog[scanlog_n - 1], line, sizeof(scanlog[0]));
+	} else if (scanlog_n < SCANLOG_MAX) {
 		strlcpy(scanlog[scanlog_n++], line, sizeof(scanlog[0]));
 	} else {
 		memmove(scanlog[0], scanlog[1], (SCANLOG_MAX - 1) * sizeof(scanlog[0]));

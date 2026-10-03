@@ -289,7 +289,7 @@ int rotor_travel_ms(const struct rotor_config *rc, int from, int to)
 	double deg;
 
 	if (from == SAT_UNKNOWN || to == SAT_UNKNOWN)
-		return 45000;
+		return 20000;
 	if (rc->mode == ROTOR_USALS)
 		deg = fabs(usals_angle(rc->lat, rc->lon, to) - usals_angle(rc->lat, rc->lon, from));
 	else
