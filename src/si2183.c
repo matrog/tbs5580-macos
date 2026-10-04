@@ -662,6 +662,19 @@ int si2183_init(struct si2183 *dev)
 		return ret;
 	}
 
+	/*
+	 * Configure the demod pins (CONFIG_PINS): routes DVB lock to the GPIO
+	 * that drives the TBS5580 green lock LED. Without this the LED never
+	 * lights (matches the LibreELEC/crazycat TBS5580 LED patch). Non-fatal.
+	 */
+	memcpy(cmd.args, "\x12\x08\x00", 3);
+	cmd.wlen = 3;
+	cmd.rlen = 3;
+	ret = si2183_cmd_execute(dev, &cmd);
+	if (ret)
+		LOG("si2183: err set config pins (lock LED)\n");
+	ret = 0;
+
 	dev->fw_loaded = true;
 warm:
 	dev->active = true;

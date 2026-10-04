@@ -51,6 +51,7 @@ the channel being played.
   (lock, C/N, dBm, bitrate), and one-key play to VLC.
 - **Transport-stream output**: to a file, to stdout, over UDP, or over a small
   built-in **HTTP server** (whole mux, a single service, or an M3U playlist).
+- **Lock LED**: lights the card's green LED while the demodulator is locked.
 - A per-channel list stored as a simple tab-separated `channels.conf`, with the
   satellite and rotor position of each channel.
 
