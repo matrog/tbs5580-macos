@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include "tsout.h"
+#include "channels.h"
 
 #define TS_PACKET 188
 #define UDP_PACKETS 7
@@ -65,6 +66,14 @@ struct tsout {
 	u8 *scratch;		/* filtered output, writer thread only */
 
 
+	/* mobile playlist (/all.m3u) + tune-on-request (/tune/<idx>) */
+	const struct channel_list *chlist;
+	pthread_mutex_t rt_lock;
+	pthread_cond_t rt_cond;
+	int rt_idx;
+	enum { RT_IDLE, RT_PENDING, RT_TAKEN, RT_DONE } rt_state;
+	bool rt_ok;
+
 	pthread_t writer, http_thread;
 	bool writer_running, http_running;
 	volatile bool stop;
@@ -101,6 +110,9 @@ struct tsout *tsout_create(size_t ring_size, struct psi *psi)
 	pthread_mutex_init(&o->lock, NULL);
 	pthread_cond_init(&o->cond, NULL);
 	pthread_mutex_init(&o->clients_lock, NULL);
+	pthread_mutex_init(&o->rt_lock, NULL);
+	pthread_cond_init(&o->rt_cond, NULL);
+	o->rt_state = RT_IDLE;
 	return o;
 }
 
@@ -251,6 +263,70 @@ static const u8 *filter_apply(struct tsout *o, struct ts_filter *f, const u8 *bu
 
 /* ---- HTTP ---------------------------------------------------------------- */
 
+void tsout_set_channels(struct tsout *o, const struct channel_list *list)
+{
+	pthread_mutex_lock(&o->rt_lock);
+	o->chlist = list;
+	pthread_mutex_unlock(&o->rt_lock);
+}
+
+int tsout_take_tune_request(struct tsout *o)
+{
+	int idx = -1;
+
+	pthread_mutex_lock(&o->rt_lock);
+	if (o->rt_state == RT_PENDING) {
+		idx = o->rt_idx;
+		o->rt_state = RT_TAKEN;
+	}
+	pthread_mutex_unlock(&o->rt_lock);
+	return idx;
+}
+
+void tsout_tune_done(struct tsout *o, bool ok)
+{
+	pthread_mutex_lock(&o->rt_lock);
+	if (o->rt_state == RT_TAKEN) {
+		o->rt_ok = ok;
+		o->rt_state = RT_DONE;
+		pthread_cond_broadcast(&o->rt_cond);
+	}
+	pthread_mutex_unlock(&o->rt_lock);
+}
+
+/*
+ * Ask the main thread to tune to channel `idx`; wait up to ~20 s for it.
+ * Returns the service id to stream, or -1 on failure/unknown index.
+ */
+static int http_request_tune(struct tsout *o, int idx)
+{
+	struct timespec ts;
+	struct timeval now;
+	int sid = -1;
+	bool ok = false;
+
+	pthread_mutex_lock(&o->rt_lock);
+	if (!o->chlist || idx < 0 || idx >= o->chlist->n) {
+		pthread_mutex_unlock(&o->rt_lock);
+		return -1;
+	}
+	sid = o->chlist->ch[idx].sid;
+	o->rt_idx = idx;
+	o->rt_state = RT_PENDING;
+	pthread_cond_broadcast(&o->rt_cond);
+
+	gettimeofday(&now, NULL);
+	ts.tv_sec = now.tv_sec + 20;
+	ts.tv_nsec = now.tv_usec * 1000;
+	while (o->rt_state != RT_DONE)
+		if (pthread_cond_timedwait(&o->rt_cond, &o->rt_lock, &ts) != 0)
+			break;		/* timed out */
+	ok = (o->rt_state == RT_DONE) && o->rt_ok;
+	o->rt_state = RT_IDLE;
+	pthread_mutex_unlock(&o->rt_lock);
+	return ok ? sid : -1;
+}
+
 static void http_reply(int fd, const char *status, const char *type, const char *body)
 {
 	char hdr[256];
@@ -284,6 +360,34 @@ static void http_playlist(struct tsout *o, int fd, const char *host)
 		}
 		pthread_mutex_unlock(&o->psi->lock);
 	}
+	http_reply(fd, "200 OK", "audio/x-mpegurl", body);
+	free(body);
+}
+
+/* Playlist of every known channel; each entry tunes on demand (/tune/<idx>). */
+static void http_all_playlist(struct tsout *o, int fd, const char *host)
+{
+	size_t cap = 1 << 20, n = 0;
+	char *body = malloc(cap);
+	int i;
+
+	if (!body)
+		return;
+	n += snprintf(body + n, cap - n, "#EXTM3U\n");
+	pthread_mutex_lock(&o->rt_lock);
+	if (o->chlist) {
+		for (i = 0; i < o->chlist->n && n < cap - 512; i++) {
+			const struct channel *c = &o->chlist->ch[i];
+			char sat[16];
+
+			sat_format(c->sat, sat, sizeof(sat));
+			n += snprintf(body + n, cap - n,
+				      "#EXTINF:-1,%s%s  [%s]\nhttp://%s/tune/%d\n",
+				      c->scrambled ? "$" : "", c->name[0] ? c->name : "Service",
+				      sat, host, i);
+		}
+	}
+	pthread_mutex_unlock(&o->rt_lock);
 	http_reply(fd, "200 OK", "audio/x-mpegurl", body);
 	free(body);
 }
@@ -325,7 +429,19 @@ static void http_handle(struct tsout *o, int fd)
 		http_playlist(o, fd, host);
 		goto close;
 	}
-	if (path[0] == '/' && isdigit((unsigned char)path[1])) {
+	if (strcmp(path, "/all.m3u") == 0) {
+		http_all_playlist(o, fd, host);
+		goto close;
+	}
+	if (strncmp(path, "/tune/", 6) == 0) {
+		/* tune to the requested channel first (done by the main thread) */
+		sid = http_request_tune(o, atoi(path + 6));
+		if (sid < 0) {
+			http_reply(fd, "503 Service Unavailable", "text/plain",
+				   "could not tune that channel\n");
+			goto close;
+		}
+	} else if (path[0] == '/' && isdigit((unsigned char)path[1])) {
 		sid = atoi(path + 1);
 	} else if (strcmp(path, "/") != 0 && strcmp(path, "/ts") != 0) {
 		http_reply(fd, "404 Not Found", "text/plain", "not found\n");

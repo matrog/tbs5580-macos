@@ -37,6 +37,22 @@ int tsout_add_udp(struct tsout *o, const char *hostport);	/* "host:port" */
 int tsout_add_http(struct tsout *o, int port);
 /* Restrict the file/UDP outputs to one service, -1 = whole TS. */
 void tsout_set_sid(struct tsout *o, int sid);
+
+/*
+ * Channel list for the "all channels" mobile playlist (/all.m3u) and
+ * tune-on-request (/tune/<index>). The list is owned by the caller and must
+ * stay valid; call again after it is reloaded. NULL disables the feature.
+ */
+struct channel_list;
+void tsout_set_channels(struct tsout *o, const struct channel_list *list);
+
+/*
+ * Remote tune hand-off to the main thread (the only one allowed to touch the
+ * tuner). The main loop calls tsout_take_tune_request() regularly: it returns
+ * a channel index to tune to, or -1. After tuning it calls tsout_tune_done().
+ */
+int tsout_take_tune_request(struct tsout *o);
+void tsout_tune_done(struct tsout *o, bool ok);
 int tsout_start(struct tsout *o);
 void tsout_push(struct tsout *o, const u8 *buf, int len);
 /* After a retune: drop buffered data, reset the PSI parser, disconnect HTTP clients. */

@@ -324,7 +324,13 @@ int frontend_rotor_goto(struct frontend *fe, const struct fe_config *cfg, int sa
 	u8 msg[6];
 	int len, travel;
 
-	if (sat == SAT_UNKNOWN || sat == fe->rotor_sat)
+	/*
+	 * Always send the positioning command (don't skip when sat matches the
+	 * cached position): the dish may have been moved by another program or
+	 * by hand, so the cache can be stale. The travel-time estimate below
+	 * still uses the cache, so same-satellite tunes don't wait needlessly.
+	 */
+	if (sat == SAT_UNKNOWN)
 		return 0;
 	if (t && rotor_target_valid(t))
 		target = *t;

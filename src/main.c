@@ -16,6 +16,7 @@
 #include <getopt.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <termios.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -108,7 +109,8 @@ struct options {
 	int lock_timeout;
 	const char *channels;
 	bool scan_single;
-	const char *player;
+	const char *player;	/* "vlc" (default), "mpv", or a custom command */
+	const char *player_size;	/* player window "WxH", or "full" */
 	bool no_player;
 	int n_xfers;
 	int xfer_size;
@@ -180,8 +182,9 @@ static void usage(const char *prog)
 "Channel list:\n"
 "  -c, --channels FILE     channel list file (default channels.conf)\n"
 "      --scan-single       scan only the given transponder, ignore the NIT\n"
-"      --player CMD        player command for -i, the URL is appended\n"
-"                          (default: open -a VLC)\n"
+"      --player P          player for -i: vlc (default), mpv, or a custom\n"
+"                          command (the URL is appended)\n"
+"      --player-size WxH   player window size (default 960x540; 'full' = none)\n"
 "      --no-player         -i only prints the URL\n"
 "\n"
 "Other:\n"
@@ -243,6 +246,20 @@ static void print_lock(struct app *a)
 	if (st.strength_valid)
 		LOG(", RF %.1f dBm", st.strength_mdbm / 1000.0);
 	LOG("\n");
+}
+
+/* Print a fatal message to the controlling terminal, even when stderr has been
+ * redirected to tbs5580.log (interactive mode). */
+static void term_error(const char *fmt, ...)
+{
+	FILE *tty = fopen("/dev/tty", "w");
+	va_list ap;
+
+	va_start(ap, fmt);
+	vfprintf(tty ? tty : stderr, fmt, ap);
+	va_end(ap);
+	if (tty)
+		fclose(tty);
 }
 
 static void format_status(struct app *a, char *line, size_t size, uint64_t *last_bytes,
@@ -700,29 +717,70 @@ static int mode_blindscan(struct app *a)
 
 /* ---- mode: interactive (ncurses TUI) ------------------------------------- */
 
-static bool channel_visible(const struct channel *c, bool show_all)
+enum { MEDIA_TV = 0, MEDIA_RADIO, MEDIA_BOTH };
+
+static bool channel_visible(const struct channel *c, bool show_all, int media)
 {
-	return show_all || (!c->scrambled && (psi_type_is_tv(c->type) || psi_type_is_radio(c->type)));
+	bool tv = psi_type_is_tv(c->type);
+	bool radio = psi_type_is_radio(c->type);
+
+	if (!tv && !radio)
+		return false;		/* data services: never shown */
+	if (media == MEDIA_TV && !tv)
+		return false;
+	if (media == MEDIA_RADIO && !radio)
+		return false;
+	if (!show_all && c->scrambled)
+		return false;		/* free only, unless Ctrl-A */
+	return true;
 }
 
 static void launch_player(struct app *a, const char *url)
 {
 	char cmd[1024];
-	pid_t pid;
-	int status;
+	const char *p = a->opt.player;
+	const char *size = a->opt.player_size ? a->opt.player_size : "960x540";
+	int w = 0, h = 0;
 
 	if (a->opt.no_player)
 		return;
-	if (a->opt.player) {
-		snprintf(cmd, sizeof(cmd), "%s '%s' >/dev/null 2>&1 &", a->opt.player, url);
-		if (system(cmd) != 0)
-			return;
-		return;
-	}
-	char *argv[] = { "open", "-a", "VLC", (char *)url, NULL };
+	if (sscanf(size, "%dx%d", &w, &h) != 2 || w < 16 || h < 16)
+		w = h = 0;		/* "full" or anything invalid: native size */
+	else
+		h = (w * 9 + 8) / 16;	/* keep the window 16:9 (derive height) */
 
-	if (posix_spawn(&pid, "/usr/bin/open", NULL, NULL, argv, environ) == 0)
-		waitpid(pid, &status, 0);
+	if (!p || !*p || strcasecmp(p, "vlc") == 0) {
+		static const char *vlc = "/Applications/VLC.app/Contents/MacOS/VLC";
+
+		if (access(vlc, X_OK) != 0) {	/* no VLC binary: let macOS open it */
+			char *argv[] = { "open", "-a", "VLC", (char *)url, NULL };
+			pid_t pid;
+			int status;
+
+			if (posix_spawn(&pid, "/usr/bin/open", NULL, NULL, argv, environ) == 0)
+				waitpid(pid, &status, 0);
+			return;
+		}
+		if (w)
+			/* only the width: VLC derives the height from the video's
+			 * aspect ratio, so the picture keeps 16:9 and isn't stretched */
+			snprintf(cmd, sizeof(cmd),
+				 "'%s' --width %d '%s' >/dev/null 2>&1 &", vlc, w, url);
+		else
+			snprintf(cmd, sizeof(cmd), "'%s' '%s' >/dev/null 2>&1 &", vlc, url);
+	} else if (strcasecmp(p, "mpv") == 0) {
+		if (w)
+			snprintf(cmd, sizeof(cmd),
+				 "mpv --no-terminal --force-window=yes --autofit=%dx%d '%s' "
+				 ">/dev/null 2>&1 &", w, h, url);
+		else
+			snprintf(cmd, sizeof(cmd),
+				 "mpv --no-terminal --force-window=yes '%s' >/dev/null 2>&1 &", url);
+	} else {
+		snprintf(cmd, sizeof(cmd), "%s '%s' >/dev/null 2>&1 &", p, url);
+	}
+	if (system(cmd) != 0)
+		return;
 }
 
 static bool same_tp(const struct channel *a, const struct channel *b)
@@ -773,6 +831,7 @@ struct tui {
 	int top;		/* first visible row in filt */
 	char search[64];
 	bool show_all;
+	int media;		/* MEDIA_TV (default), MEDIA_RADIO, MEDIA_BOTH */
 	int sat_filter;		/* only this satellite when sat_filter_on */
 	bool sat_filter_on;
 	int sort_mode;		/* 0 name, 1 frequency, 2 satellite */
@@ -813,7 +872,7 @@ static void tui_filter(struct tui *t)
 
 		if (t->sat_filter_on && c->sat != t->sat_filter)
 			continue;
-		if (!channel_visible(c, t->show_all))
+		if (!channel_visible(c, t->show_all, t->media))
 			continue;
 		if (t->search[0] && !strcasestr(c->name, t->search) &&
 		    !strcasestr(c->provider, t->search))
@@ -866,8 +925,11 @@ static void tui_draw(struct tui *t)
 		}
 		static const char *sortname[] = { "name", "freq", "sat" };
 
-		snprintf(buf, sizeof(buf), " tbs5580  -  %d/%d channels%s%s  sort:%s ",
-			 t->nfilt, t->list->n, t->show_all ? "  [all]" : "  [free]", satf,
+		static const char *medianame[] = { "TV", "Radio", "TV+Radio" };
+
+		snprintf(buf, sizeof(buf), " tbs5580  -  %d/%d  %s%s%s  sort:%s ",
+			 t->nfilt, t->list->n, medianame[t->media],
+			 t->show_all ? "  [all]" : "  [free]", satf,
 			 sortname[t->sort_mode]);
 	}
 	mvprintw(0, 0, "%-*s", cols, buf);
@@ -944,7 +1006,7 @@ static void tui_draw(struct tui *t)
 	else
 		attron(A_REVERSE);
 	mvprintw(rows - 1, 0, "%-*s", cols,
-		 " up/down  Enter play  type search  ^F sat  ^O sort  ^N scan  ^A all  Esc quit ");
+		 " Up/Dn play  search  ^T tv/radio  ^F sat  ^O sort  ^N scan  ^A scrambled  ^S set  Esc quit ");
 	if (has_colors())
 		attroff(COLOR_PAIR(CP_HEADER));
 	else
@@ -1113,6 +1175,95 @@ static bool tui_input_target(int *sat, struct rotor_target *rt)
 	return true;
 }
 
+/*
+ * Pick a scan target: a menu of the satellites already in the list (each with
+ * its stored rotor position), plus "Add a new satellite..." for a fresh one.
+ */
+static bool tui_pick_target(struct tui *t, int *sat, struct rotor_target *rt)
+{
+	int sats[32];
+	struct rotor_target rts[32];
+	int ns = 0, i, j, choice = 0;
+
+	for (i = 0; i < t->list->n; i++) {
+		int sv = t->list->ch[i].sat;
+
+		if (sv == SAT_UNKNOWN)
+			continue;
+		for (j = 0; j < ns; j++)
+			if (sats[j] == sv)
+				break;
+		if (j == ns && ns < 32) {
+			sats[ns] = sv;
+			rts[ns] = t->list->ch[i].rotor;
+			ns++;
+		} else if (j < ns && !rotor_target_valid(&rts[j]) &&
+			   rotor_target_valid(&t->list->ch[i].rotor)) {
+			rts[j] = t->list->ch[i].rotor;
+		}
+	}
+
+	for (;;) {
+		int rows = LINES, cols = COLS, ch, addrow;
+
+		erase();
+		if (has_colors())
+			attron(COLOR_PAIR(CP_HEADER));
+		else
+			attron(A_REVERSE);
+		mvprintw(0, 0, "%-*s", cols, " Target satellite ");
+		if (has_colors())
+			attroff(COLOR_PAIR(CP_HEADER));
+		else
+			attroff(A_REVERSE);
+
+		for (i = 0; i < ns && i < rows - 4; i++) {
+			char sn[16], how[48];
+
+			sat_format(sats[i], sn, sizeof(sn));
+			rotor_target_format(&rts[i], how, sizeof(how));
+			if (choice == i)
+				attron(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE);
+			mvprintw(2 + i, 2, " %-8s   rotor: %-22s ", sn, how);
+			if (choice == i)
+				attroff(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE);
+		}
+		addrow = 2 + (ns < rows - 4 ? ns : rows - 4);
+		if (choice == ns)
+			attron(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE);
+		mvprintw(addrow, 2, " Add a new satellite... ");
+		if (choice == ns)
+			attroff(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE);
+
+		mvprintw(rows - 1, 0, " up/down  Enter select  Esc cancel");
+		refresh();
+
+		ch = getch();
+		if (ch == ERR) {
+			if (g_stop)
+				return false;
+			continue;
+		}
+		if (ch == 27)
+			return false;
+		if (ch == KEY_UP && choice > 0) {
+			choice--;
+			continue;
+		}
+		if (ch == KEY_DOWN && choice < ns) {
+			choice++;
+			continue;
+		}
+		if (ch != '\n' && ch != '\r' && ch != KEY_ENTER)
+			continue;
+		if (choice == ns)			/* "Add a new satellite..." */
+			return tui_input_target(sat, rt);
+		*sat = sats[choice];
+		*rt = rts[choice];
+		return true;
+	}
+}
+
 /* DiSEqC 1.2 / USALS target -> rotor config, so the scan points the dish. */
 static void cfg_rotor_from_target(struct rotor_config *rc, const struct rotor_target *t)
 {
@@ -1132,8 +1283,10 @@ static void cfg_rotor_from_target(struct rotor_config *rc, const struct rotor_ta
 
 static void tui_reload(struct tui *t)
 {
+	tsout_set_channels(t->a->out, NULL);	/* HTTP must not read it while it moves */
 	channel_list_free(t->list);
 	channels_load(t->a->opt.channels, t->list);
+	tsout_set_channels(t->a->out, t->list);
 	channel_list_sort(t->list);
 	if (t->list->n > t->filt_cap) {
 		int *f = realloc(t->filt, t->list->n * sizeof(int));
@@ -1347,10 +1500,10 @@ static void tui_scan_menu(struct tui *t)
 			continue;
 
 		if (choice == 3) {			/* change target */
-			tui_input_target(&sat, &rt);
+			tui_pick_target(t, &sat, &rt);
 			continue;
 		}
-		if (sat == SAT_UNKNOWN && !tui_input_target(&sat, &rt))
+		if (sat == SAT_UNKNOWN && !tui_pick_target(t, &sat, &rt))
 			continue;		/* a target is required */
 
 		/* seed the TP prompt from the selected channel only if same sat */
@@ -1361,14 +1514,16 @@ static void tui_scan_menu(struct tui *t)
 	}
 }
 
-static void tui_play(struct tui *t, int list_idx)
+/* Tune to a channel. remote = request from the mobile playlist (no local UI).
+ * Returns true if the service is ready to stream. */
+static bool tui_tune(struct tui *t, int list_idx, bool remote)
 {
 	struct app *a = t->a;
 	const struct channel *c = &t->list->ch[list_idx];
-	char url[128];
 	uint64_t deadline;
 	bool ready = false, missing = false;
 
+	(void)remote;
 	if (!t->cur_valid || !same_tp(c, &t->cur)) {
 		struct tune_req req = {
 			.freq_khz = c->freq_khz, .pol_h = c->pol_h,
@@ -1385,7 +1540,7 @@ static void tui_play(struct tui *t, int list_idx)
 			req.delsys = DELSYS_NONE;
 			if (retune(a, &req, 5000)) {
 				tui_set_msg(t, true, " No signal on %s (feed off air?)", c->name);
-				return;
+				return false;
 			}
 		}
 		t->cur = *c;
@@ -1408,18 +1563,148 @@ static void tui_play(struct tui *t, int list_idx)
 	}
 	if (missing) {
 		tui_set_msg(t, true, " '%s' is not on this transponder (rescan?)", c->name);
-		return;
+		return false;
 	}
 	if (ready && !service_on_air(a, c->sid)) {
 		tui_set_msg(t, true, " '%s' is not broadcasting right now", c->name);
-		return;
+		return false;
 	}
 
 	t->cur_idx = list_idx;
-	snprintf(url, sizeof(url), "http://127.0.0.1:%d/%u", a->opt.http_port, c->sid);
-	launch_player(a, url);
+	return true;
+}
+
+static void tui_play(struct tui *t, int list_idx)
+{
+	const struct channel *c = &t->list->ch[list_idx];
+	char url[128];
+
+	if (!tui_tune(t, list_idx, false))
+		return;
+	snprintf(url, sizeof(url), "http://127.0.0.1:%d/%u", t->a->opt.http_port, c->sid);
+	launch_player(t->a, url);
 	if (!t->msg_err)
 		tui_set_msg(t, false, " Playing %s  ->  %s", c->name, url);
+}
+
+/* Rewrite ./tbs5580.rc keeping lines we don't manage, then our settings. */
+static void settings_save(struct app *a)
+{
+	static const char *managed[] = { "--player", "--player-size", "--http", "-H", NULL };
+	char keep[128][256];
+	int nkeep = 0, i;
+	FILE *f = fopen("tbs5580.rc", "r");
+
+	if (f) {
+		char buf[256];
+
+		while (nkeep < 128 && fgets(buf, sizeof(buf), f)) {
+			char tok[64] = "";
+			bool skip = false;
+
+			sscanf(buf, "%63s", tok);
+			for (i = 0; managed[i]; i++)
+				if (strcmp(tok, managed[i]) == 0)
+					skip = true;
+			buf[strcspn(buf, "\r\n")] = 0;
+			if (!skip && tok[0])
+				strlcpy(keep[nkeep++], buf, sizeof(keep[0]));
+		}
+		fclose(f);
+	}
+	f = fopen("tbs5580.rc", "w");
+	if (!f) {
+		LOG("settings: cannot write tbs5580.rc\n");
+		return;
+	}
+	for (i = 0; i < nkeep; i++)
+		fprintf(f, "%s\n", keep[i]);
+	if (a->opt.player && *a->opt.player)
+		fprintf(f, "--player %s\n", a->opt.player);
+	if (a->opt.player_size && *a->opt.player_size)
+		fprintf(f, "--player-size %s\n", a->opt.player_size);
+	if (a->opt.http_port)
+		fprintf(f, "--http %d\n", a->opt.http_port);
+	fclose(f);
+}
+
+/* Settings editor; values persist to tbs5580.rc. Some apply only on restart. */
+static void tui_settings_menu(struct tui *t)
+{
+	struct app *a = t->a;
+	int choice = 0;
+	const int nitems = 4;		/* player, size, http, save */
+
+	for (;;) {
+		int rows = LINES, cols = COLS, ch;
+		char buf[128];
+
+		erase();
+		if (has_colors())
+			attron(COLOR_PAIR(CP_HEADER));
+		else
+			attron(A_REVERSE);
+		mvprintw(0, 0, "%-*s", cols, " Settings (saved to tbs5580.rc) ");
+		if (has_colors())
+			attroff(COLOR_PAIR(CP_HEADER));
+		else
+			attroff(A_REVERSE);
+
+#define ROW(i, fmt, ...) do { \
+		if (choice == (i)) attron(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE); \
+		mvprintw(2 + (i), 2, fmt, ##__VA_ARGS__); clrtoeol(); \
+		if (choice == (i)) attroff(has_colors() ? COLOR_PAIR(CP_SEL) : A_REVERSE); \
+	} while (0)
+		ROW(0, " Player:       %s ", a->opt.player && *a->opt.player ? a->opt.player : "vlc");
+		ROW(1, " Window size:  %s ", a->opt.player_size ? a->opt.player_size : "960x540");
+		ROW(2, " HTTP port:    %d  (restart to apply) ", a->opt.http_port);
+		ROW(3, " Save to tbs5580.rc and close ");
+#undef ROW
+		mvprintw(rows - 1, 0, " up/down  Enter edit/save  Esc close (no save) ");
+		refresh();
+
+		ch = getch();
+		if (ch == ERR) {
+			if (g_stop)
+				return;
+			continue;
+		}
+		if (ch == 27)
+			return;
+		if (ch == KEY_UP && choice > 0) {
+			choice--;
+			continue;
+		}
+		if (ch == KEY_DOWN && choice < nitems - 1) {
+			choice++;
+			continue;
+		}
+		if (ch != '\n' && ch != '\r' && ch != KEY_ENTER)
+			continue;
+
+		switch (choice) {
+		case 0:
+			if (tui_input_line(" Player (vlc, mpv, or a command): ",
+					   a->opt.player ? a->opt.player : "vlc", buf, sizeof(buf)))
+				a->opt.player = strdup(buf);
+			break;
+		case 1:
+			if (tui_input_line(" Window size (WxH, or full): ",
+					   a->opt.player_size ? a->opt.player_size : "960x540",
+					   buf, sizeof(buf)))
+				a->opt.player_size = strdup(buf);
+			break;
+		case 2:
+			snprintf(buf, sizeof(buf), "%d", a->opt.http_port);
+			if (tui_input_line(" HTTP port: ", buf, buf, sizeof(buf)) && atoi(buf) > 0)
+				a->opt.http_port = atoi(buf);
+			break;
+		case 3:
+			settings_save(a);
+			tui_set_msg(t, false, " Settings saved to tbs5580.rc");
+			return;
+		}
+	}
 }
 
 static int mode_interactive(struct app *a)
@@ -1442,6 +1727,7 @@ static int mode_interactive(struct app *a)
 	t.list = &list;
 	t.cur_idx = -1;
 	t.last_t = now_ms();
+	tsout_set_channels(a->out, &list);	/* for /all.m3u and /tune/<idx> */
 	t.filt = malloc((list.n + 1) * sizeof(int));
 	t.filt_cap = list.n;
 	if (!t.filt) {
@@ -1453,6 +1739,13 @@ static int mode_interactive(struct app *a)
 	cbreak();
 	noecho();
 	keypad(stdscr, TRUE);
+	{			/* let Ctrl-S reach us (disable XON/XOFF flow control) */
+		struct termios tio;
+		if (tcgetattr(STDIN_FILENO, &tio) == 0) {
+			tio.c_iflag &= ~(IXON | IXOFF);
+			tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+		}
+	}
 	curs_set(0);
 	set_escdelay(25);
 	timeout(500);		/* refresh the signal line twice a second */
@@ -1471,7 +1764,20 @@ static int mode_interactive(struct app *a)
 	if (list.n == 0)	/* no channels yet: go straight to the scan menu */
 		tui_scan_menu(&t);
 	while (!g_stop) {
+		int ridx;
+
 		tui_draw(&t);
+
+		/* a mobile client asked (over HTTP) to tune a channel: do it here,
+		 * the main thread is the only one allowed to touch the tuner */
+		ridx = tsout_take_tune_request(a->out);
+		if (ridx >= 0) {
+			bool ok = ridx < list.n && tui_tune(&t, ridx, true);
+
+			tsout_tune_done(a->out, ok);
+			continue;
+		}
+
 		ch = getch();
 		if (ch == ERR)
 			continue;	/* timeout: redraw with fresh signal */
@@ -1508,7 +1814,14 @@ static int mode_interactive(struct app *a)
 			if (t.nfilt)
 				tui_play(&t, t.filt[t.sel]);
 			break;
-		case 1:		/* Ctrl-A: toggle scrambled/data visibility */
+		case 20:	/* Ctrl-T: cycle TV / Radio / both */
+			t.media = (t.media + 1) % 3;
+			tui_filter(&t);
+			break;
+		case 19:	/* Ctrl-S: settings */
+			tui_settings_menu(&t);
+			break;
+		case 1:		/* Ctrl-A: show/hide scrambled channels */
 			t.show_all = !t.show_all;
 			tui_filter(&t);
 			break;
@@ -1668,6 +1981,7 @@ int main(int argc, char **argv)
 		{ "scan-single", no_argument, NULL, 11 },
 		{ "player", required_argument, NULL, 12 },
 		{ "no-player", no_argument, NULL, 13 },
+		{ "player-size", required_argument, NULL, 24 },
 		{ "interactive", no_argument, NULL, 'i' },
 		{ "channels", required_argument, NULL, 'c' },
 		{ "blindscan", no_argument, NULL, 14 },
@@ -1819,6 +2133,9 @@ int main(int argc, char **argv)
 		case 13:
 			opt->no_player = true;
 			break;
+		case 24:
+			opt->player_size = optarg;
+			break;
 		case 'i':
 			opt->mode = MODE_INTERACTIVE;
 			break;
@@ -1955,8 +2272,13 @@ int main(int argc, char **argv)
 			; /* fall back to stderr */
 	}
 
-	if (frontend_open(&app.fe, cfg))
+	if (frontend_open(&app.fe, cfg)) {
+		term_error("tbs5580: impossibile inizializzare la TBS5580.\n"
+			   "  Dispositivo non trovato, oppure gia' in uso da un'altra\n"
+			   "  istanza del programma. Dettagli in tbs5580.log.\n");
+		ret = 1;
 		goto out;
+	}
 
 	for (c = 0; c < opt->n_motor && !g_stop; c++) {
 		if (frontend_motor(&app.fe, cfg, opt->motor[c]))

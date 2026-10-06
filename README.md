@@ -192,10 +192,13 @@ A full-screen, ncurses-based chooser:
 | Enter        | tune and play the selected channel in VLC                |
 | `Ctrl-F`     | filter by satellite (pick one, or All)                   |
 | `Ctrl-O`     | change sort order: name → frequency → satellite          |
+| `Ctrl-T`     | cycle shown type: **TV** (default), **Radio**, **TV+Radio** |
 | `Ctrl-N` / F2| open the **scan menu** (see below)                       |
-| `Ctrl-A`     | show/hide scrambled and data services                    |
+| `Ctrl-A`     | show/hide scrambled channels                             |
 | Esc          | clear the search, or quit if the search is empty         |
 
+Data services (neither TV nor radio, e.g. test "Service 1" entries) are never
+listed; the active type (TV/Radio/TV+Radio) is shown in the header.
 Scrambled channels are shown with a `$` in front of the name. The bottom line
 shows the live signal of the channel being played. Log messages (USB, HTTP,
 tuning) go to `tbs5580.log` so they don't clutter the screen.
@@ -225,12 +228,20 @@ transponders it actually sees and never wipes the rest of the list.
 #   /               the whole transponder
 #   /<sid>          a single service
 #   /playlist.m3u   the channels of the transponder (open it in VLC)
+#   /all.m3u        every channel; picking one tunes it on demand
+#   /tune/<index>   tune to that channel and stream it
 ./tbs5580 -f 11766 -p H -s 27500 -H 8001
 
 # a single service to stdout into VLC, or the whole mux to a file
 ./tbs5580 -f 11766 -p H -s 27500 -S 3401 -o - | /Applications/VLC.app/Contents/MacOS/VLC -
 ./tbs5580 -f 12188 -p H -s 27500 -D 2 -o mux.ts -t 30
 ```
+
+**Watch on a phone/tablet:** with the TUI running (`-i` starts the HTTP server
+on port 8001), open `http://<mac-ip>:8001/all.m3u` in VLC/mpv on the device —
+a playlist of every channel. Picking one tunes it (moving the dish if needed)
+and streams it. There is one tuner, so it is one channel at a time: selecting
+another from the phone changes what is tuned (also for a local viewer).
 
 Useful options: `-d S|S2|auto`, `--lnb universal|LOF|LOF1,LOF2,SLOF`,
 `-D 1-4` (DiSEqC 1.0), `--isi`/`--pls-gold`/`--pls-root` (multistream),
